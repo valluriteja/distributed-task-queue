@@ -1,11 +1,13 @@
 import time
 import multiprocessing
-from task_queue import pop_task, push_task, push_to_dead_letter
+from task_queue import pop_task, push_task, push_to_dead_letter, update_task_status
+from datetime import datetime
 
 MAX_RETRIES = 3
 
 def process_task(task):
     """Actually execute the task"""
+    start_time = datetime.now()
     print(f"⚙️  [{multiprocessing.current_process().name}] Processing: {task['type']} | ID: {task['id']}")
 
     if task["type"] == "send_email":
@@ -22,12 +24,26 @@ def process_task(task):
     else:
         print(f"❓ Unknown task type: {task['type']}")
 
-    print(f"✅ [{multiprocessing.current_process().name}] Done: {task['id']}")
+    # Calculate how long it took
+    duration = (datetime.now() - start_time).total_seconds()
+
+    # Update status to done
+    update_task_status(task["id"], "completed")
+
+    # Store metrics in Redis
+    from task_queue import r
+    r.lpush("task_durations", duration)
+    r.ltrim("task_durations", 0, 999)  # keep last 1000 durations
+    r.incr("total_tasks_processed")
+
+    print(f"✅ [{multiprocessing.current_process().name}] Done: {task['id']} in {duration:.2f}s")
 
 def handle_failure(task, error):
     """Retry or send to dead letter queue"""
     task["retries"] += 1
     print(f"❌ Task failed: {task['id']} | Retries: {task['retries']} | Error: {error}")
+
+    update_task_status(task["id"], "retrying", error=str(error))
 
     if task["retries"] < MAX_RETRIES:
         print(f"🔄 Retrying task: {task['id']}...")
@@ -60,7 +76,6 @@ def run_worker_pool(num_workers=3):
         processes.append(p)
         print(f"✅ Worker-{i+1} launched!")
 
-    # Keep main process alive
     for p in processes:
         p.join()
 
